@@ -1,0 +1,5 @@
+vec_len: 2
+ncentroids: 64
+distance_p: "2.0"
+keep_last_n: 0
+checkpoint: null

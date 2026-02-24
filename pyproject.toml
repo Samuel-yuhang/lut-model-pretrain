@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "LUTNeuro"
+version = "0.1.0"
+description = "A neural network library with LUT operations"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "triton",
+    "transformers",
+    "datasets",
+    "accelerate",
+    "hf_transfer",
+    "rich",
+]
+license = "MIT"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lutneuro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "UP", "N", "C", "W"]
+ignore = ["C901", "N818", "N803", "N812", "N806", "E741", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lutneuro"]
