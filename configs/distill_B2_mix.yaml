@@ -1,0 +1,13 @@
+# Qwen3-0.6B-Base, activation-only LUT (v=2, 64 centroids); hybrid scheme B2: FP layers [0, 2, 3, 7, 21, 26, 27] (3:1)
+# FP set from greedy FP selection on all-LUT k-means PTQ model (results/sens_*.json)
+vec_len: 2
+ncentroids: 64
+distance_p: "2.0"
+keep_last_n: 0
+checkpoint: null
+lut_layers: [1, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25]
+quantize_lm_head: false
+transform: mix
+beta: 0.25
+codebook_task_grad: true
+assign_chunk: 4096
