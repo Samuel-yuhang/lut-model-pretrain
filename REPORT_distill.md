@@ -117,10 +117,11 @@
 | `configs/distill_{A,all}_{plain,mix}.yaml` | 实验配置 |
 
 ```bash
-# 环境：~/mlsys/lut-llm/.venv（叠加在 ~/mlsys/venv 上，另装 pyarrow / matplotlib / lm-eval / accelerate）
-~/mlsys/lut-llm/.venv/bin/python scripts/prepare_fineweb.py                    # 约 15 分钟
+# 环境：PY 指向装有 torch、transformers、accelerate、pyarrow、matplotlib、lm-eval 的 Python（脚本默认用 python）
+export PY=python
+$PY scripts/prepare_fineweb.py                    # 约 15 分钟
 scripts/launch.sh 0,1 29641 F1_A_mix_seq --lut_config configs/distill_A_mix.yaml --mode seq --train_tokens 10e6 --eval_every 25
-PYTHONPATH=. ~/mlsys/lut-llm/.venv/bin/python scripts/eval_layerwise.py --ckpt checkpoints/F1_A_mix_seq/best --lm_eval --out results/F1_A_mix_seq.json
+PYTHONPATH=. $PY scripts/eval_layerwise.py --ckpt checkpoints/F1_A_mix_seq/best --lm_eval --out results/F1_A_mix_seq.json
 ```
 
 - checkpoint 位于 `checkpoints/<exp>/{best,final}/`：`model.safetensors`（fp32，不含 tied 的 lm_head）、`lut_config.yaml`、`meta.json`。
@@ -201,6 +202,6 @@ PTQ 底座上的 greedy 会选第 2 层（Qwen 的 massive activation 层）；�
 复现：
 
 ```bash
-PYTHONPATH=. ~/mlsys/lut-llm/.venv/bin/python scripts/sensitivity_scan.py --lut_config configs/distill_all_mix.yaml --modes in --out results/sens_ptq.json
+PYTHONPATH=. $PY scripts/sensitivity_scan.py --lut_config configs/distill_all_mix.yaml --modes in --out results/sens_ptq.json
 scripts/launch.sh 0,1 29661 F5_B1_mix_seq --lut_config configs/distill_B1_mix.yaml --mode seq --train_tokens 10e6 --eval_every 25
 ```

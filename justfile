@@ -49,12 +49,14 @@ lut_clm:
 # set -x TORCH_NCCL_ASYNC_ERROR_HANDLING 1
 # set -x NCCL_DEBUG_SUBSYS 0
 
+py := env_var_or_default("PY", "python")
+
 # layer-wise distillation of the 3:1 hybrid LUT model (scheme A, see REPORT_distill.md)
 fineweb:
-	~/mlsys/lut-llm/.venv/bin/python scripts/prepare_fineweb.py
+	{{py}} scripts/prepare_fineweb.py
 
 distill_A:
 	scripts/launch.sh 0,1 29641 F1_A_mix_seq --lut_config configs/distill_A_mix.yaml --mode seq --train_tokens 10e6 --eval_every 25
 
 eval_A:
-	PYTHONPATH=. ~/mlsys/lut-llm/.venv/bin/python scripts/eval_layerwise.py --ckpt checkpoints/F1_A_mix_seq/best --lm_eval --out results/F1_A_mix_seq.json
+	PYTHONPATH=. {{py}} scripts/eval_layerwise.py --ckpt checkpoints/F1_A_mix_seq/best --lm_eval --out results/F1_A_mix_seq.json
