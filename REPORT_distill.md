@@ -8,6 +8,21 @@
 - 全精度层严格 BF16，采用方案 A（3:1，FP 层为 3, 7, …, 27）；
 - 允许更新权重。
 
+## 00. 更新（2026-10-08）：Stage 2 端到端蒸馏
+
+在 Stage 1 checkpoint 的基础上，再用 2500 万 FineWeb token 做端到端蒸馏。损失为 logits 的 KL 加上逐层隐状态 MSE（权重 1），8 张 H100 上两组各占 4 卡并行，约 40 分钟。结果：
+
+| 配置 | 与 teacher 的 KL | wikitext2 PPL | 6 项 zero-shot 平均 |
+|---|---|---|---|
+| **B1 + Stage 2（当前最优）** | 0.141 → **0.128** | 14.69 → **14.47**（FP 12.67） | 52.1 → **53.9**（FP 55.4） |
+| A + Stage 2 | 0.172 → 0.154 | 15.40 → 15.01 | 52.0 → 53.5 |
+
+- LAMBADA 准确率提升 4–5 分，困惑度从 16–18 降到约 13。
+- zero-shot 与 FP 的差距从约 3.3 分缩小到 1.5 分。
+- 只用 logits KL 几乎没有收益，必须保留逐层 MSE 作为正则。
+
+详见 §8。
+
 ## 0. 更新（2026-10-08）：方案 B（按敏感度选 FP 层）
 
 在同样的 7 个 FP 层、相同训练配方（mix + seq + 1000 万 token）下：
@@ -204,4 +219,61 @@ PTQ 底座上的 greedy 会选第 2 层（Qwen 的 massive activation 层）；�
 ```bash
 PYTHONPATH=. $PY scripts/sensitivity_scan.py --lut_config configs/distill_all_mix.yaml --modes in --out results/sens_ptq.json
 scripts/launch.sh 0,1 29661 F5_B1_mix_seq --lut_config configs/distill_B1_mix.yaml --mode seq --train_tokens 10e6 --eval_every 25
+```
+
+## 8. Stage 2：端到端蒸馏
+
+### 8.1 方法
+
+在 `scripts/distill_blockwise.py` 中增加了 `--mode e2e`：
+- 整个学生模型的 28 层串联前向，每层做 activation checkpointing。
+- 损失 = KL(teacher‖student)（在 logits 上计算，按 2048 token 分块，学生 logits 在反向时重算，不常驻显存），加上 `hidden_weight` × 平均逐层 nmse。
+- 全精度层保持冻结（严格 BF16），但梯度会穿过它们传回前面的 LUT 层。
+- 训练的参数与 Stage 1 相同：LUT 层的码本、权重和 RMSNorm。
+- 起点是 Stage 1 的最优 checkpoint（`--init_from`）。
+- 单卡显存约 59 GB，吞吐约 3500 token/s/GPU。
+
+### 8.2 试跑（B1 起点，各 2 卡，按 32 条 held-out 序列上的 KL 选择）
+
+起点 KL 为 0.1429。
+
+| 设置 | 结果 |
+|---|---|
+| 只用 KL；权重 lr 1e-5、码本 lr 1e-3 | 约 0.140，基本不动 |
+| 只用 KL；权重 lr 3e-5、码本 lr 3e-4 | 约 0.147，变差 |
+| **KL + 逐层 MSE（权重 1）；权重 lr 1e-5、码本 lr 1e-3** | **0.134 且仍在下降**，选为正式配置 |
+| 只用 KL；权重 lr 1e-4、码本 lr 3e-4 | 0.172–0.184，明显变差 |
+
+试跑在约 250 万 token 时就已提前停止，以节省时间。
+
+### 8.3 正式训练与结果
+
+- 2500 万 token，每组 4 张卡，global batch 为 65k token/步，共 382 步。
+- 每 40 步评估一次，保存 KL 最优的 checkpoint：B1 在第 240 步，A 在第 360 步。训练过程中 KL 基本单调下降。
+
+| 配置 | FineWeb PPL | wikitext2 PPL | KL | top-1 | ARC-e | ARC-c | HellaS | PIQA | Wino | LAMBADA | 平均(6) | LAMBADA PPL | 末层累积误差 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| FP（BF16 teacher） | 19.90 | 12.67 | 0.001 | 0.977 | 58.0 | 38.1 | 53.8 | 69.8 | 58.7 | 54.3 | 55.4 | 9.6 | – |
+| A，Stage 1 | 23.40 | 15.40 | 0.172 | 0.782 | 62.2 | 35.8 | 48.4 | 67.1 | 54.6 | 44.1 | 52.0 | 17.8 | 0.114 |
+| A，Stage 1+2 | 22.89 | 15.01 | 0.154 | 0.793 | 61.2 | 36.5 | 50.0 | 66.8 | 56.9 | 49.5 | 53.5 | 13.1 | 0.123 |
+| B1，Stage 1 | 22.69 | 14.69 | 0.141 | 0.795 | 62.3 | 34.3 | 48.1 | 67.4 | 56.1 | 44.6 | 52.1 | 16.0 | 0.085 |
+| **B1，Stage 1+2** | **22.30** | **14.47** | **0.128** | **0.805** | 62.1 | 37.3 | 50.0 | 67.5 | 57.5 | 49.0 | **53.9** | **13.0** | 0.087 |
+
+### 8.4 解读
+
+1. **Stage 2 对 A 和 B1 都有效。**
+   - KL 降低 9–11%，wikitext2 降低 0.2–0.4。
+   - zero-shot 平均提升 1.5–1.8 分，大于两个 seed 之间的平均差异（0.5）。
+   - 主要来自 LAMBADA（+4.4 / +5.4）和 HellaSwag（+1.6 / +1.9）。这两个任务在 A 和 B1 上方向一致，HellaSwag 样本量大（1 万条）、标准误小，因此判断提升是真实的。
+2. **方案 B1 的优势在 Stage 2 之后依然保持**：KL 0.128 vs 0.154，wikitext2 14.47 vs 15.01。zero-shot 平均 53.9 vs 53.5，在噪声范围内。
+3. **端到端训练是用"隐状态的吻合"换"logits 的吻合"**。A 的末层累积误差从 0.114 升到 0.123，KL 却下降了。这说明逐层 MSE 不是 logits 质量的完美代理。但完全去掉它（只用 KL）几乎学不动，它在这里起的是正则作用。
+4. **收益还没有完全饱和**：A 的最优点出现在最后的第 360 步。如果继续训练（更多 token，或调整 hidden_weight），仍可能有小幅提升。
+
+### 8.5 复现
+
+```bash
+export PY=python   # 需要 torch / transformers / lm-eval 等
+C="--mode e2e --train_tokens 25e6 --eval_every 40 --warmup 15 --lr_weight 1e-5 --lr_codebook 1e-3 --hidden_weight 1.0"
+scripts/launch.sh 0,1,2,3 29691 S2_B1_e2e --lut_config configs/distill_B1_mix.yaml --init_from checkpoints/F5_B1_mix_seq/best $C
+PYTHONPATH=. $PY scripts/eval_layerwise.py --ckpt checkpoints/S2_B1_e2e/best --lm_eval --out results/S2_B1_e2e.json
 ```

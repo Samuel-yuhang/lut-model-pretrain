@@ -6,6 +6,8 @@ Modes (each group = `--group_size` consecutive decoder layers, all layer outputs
   group : input of every group is the teacher hidden state at the group start (teacher-forced, groups independent)
   layer : same with group_size 1, only LUT layers trained
   seq   : input of each group is the (detached) output of the student's previous groups -> fixes exposure bias
+  e2e   : Stage 2, end-to-end: whole student chained with gradients, loss = KL(teacher || student) on the logits
+          + hidden_weight * mean per-layer nmse (start from a Stage-1 checkpoint with --init_from)
 """
 
 import argparse
@@ -16,7 +18,9 @@ import time
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 import yaml
+from torch.utils.checkpoint import checkpoint
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM
 
@@ -34,7 +38,9 @@ def parse():
     ap.add_argument("--data_dir", default="data/fineweb10bt")
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--init_from", default=None, help="checkpoint dir to start from (skips k-means init)")
-    ap.add_argument("--mode", choices=["group", "layer", "seq"], default="group")
+    ap.add_argument("--mode", choices=["group", "layer", "seq", "e2e"], default="group")
+    ap.add_argument("--hidden_weight", type=float, default=0.0, help="e2e: weight of the per-layer hidden-state nmse")
+    ap.add_argument("--kl_chunk", type=int, default=2048, help="e2e: tokens per logits/KL chunk")
     ap.add_argument("--group_size", type=int, default=4)
     ap.add_argument("--train_fp", action="store_true", help="also train the full-precision layers (compensators)")
     ap.add_argument("--train_tokens", type=float, default=20e6)
@@ -62,6 +68,12 @@ def log(path, rec):
     print(json.dumps(rec), flush=True)
     with open(path, "a") as f:
         f.write(json.dumps(rec) + "\n")
+
+
+def chunk_kl(h_s, logp_t, norm, lm_head):
+    """Summed KL(teacher || student) over a chunk of tokens; student logits are recomputed in backward."""
+    logp_s = lm_head(norm(h_s)).float().log_softmax(-1)
+    return F.kl_div(logp_s, logp_t, log_target=True, reduction="sum")
 
 
 def save(student, cfg_dict, out_dir, extra):
@@ -156,12 +168,32 @@ def main():
     t0 = time.time()
     cursor = 0
     for step in range(steps):
-        stats = {f"g{gi}": 0.0 for gi in range(len(groups))}
+        stats = {"kl": 0.0, "hid": 0.0} if args.mode == "e2e" else {f"g{gi}": 0.0 for gi in range(len(groups))}
         lut_l = 0.0
         for _ in range(args.grad_accum):
             b = order[(cursor + rank * args.micro_batch) % train.nseq :][: args.micro_batch]
             cursor += world * args.micro_batch
             ids = train.get(b.tolist()).cuda()
+            if args.mode == "e2e":
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    hs, pe = teacher_states(teacher, ids)
+                    x, hid = hs[0], 0.0
+                    for i in range(nlayers):  # FP layers are frozen but still pass gradients to earlier LUT layers
+                        x = checkpoint(run_layer, student, i, x, pe, use_reentrant=False)
+                        if args.hidden_weight > 0:
+                            hid = hid + nmse(x, hs[i + 1], rms[i]) / nlayers
+                    xs, ht = x.flatten(0, 1), hs[-1].flatten(0, 1)
+                    kl = 0.0
+                    for c in range(0, xs.shape[0], args.kl_chunk):
+                        with torch.no_grad():
+                            logp_t = teacher.lm_head(teacher.model.norm(ht[c : c + args.kl_chunk])).float().log_softmax(-1)
+                        kl = kl + checkpoint(chunk_kl, xs[c : c + args.kl_chunk], logp_t, student.model.norm,
+                                             student.lm_head, use_reentrant=False)
+                    kl = kl / xs.shape[0]
+                    ((kl + args.hidden_weight * hid) / args.grad_accum).backward()
+                stats["kl"] += kl.item() / args.grad_accum
+                stats["hid"] += float(hid) / args.grad_accum
+                continue
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 hs, pe = teacher_states(teacher, ids)
                 h_prev = hs[0]
@@ -203,7 +235,8 @@ def main():
             for m in luts:
                 m.usage.zero_() if m.usage is not None else None
         if is_main and (step % args.log_every == 0 or step == steps - 1):
-            log(train_log, {"step": step + 1, "tokens": (step + 1) * tokens_per_step, "loss": sum(stats.values()) / len(groups),
+            loss_val = stats["kl"] + args.hidden_weight * stats["hid"] if args.mode == "e2e" else sum(stats.values()) / len(groups)
+            log(train_log, {"step": step + 1, "tokens": (step + 1) * tokens_per_step, "loss": loss_val,
                             **{k: round(v, 5) for k, v in stats.items()}, "lut_loss": lut_l, "gnorm": gnorm,
                             "lr_cb": sched.get_last_lr()[0], "mem_gb": round(torch.cuda.max_memory_allocated() / 2**30, 1),
                             "sec": round(time.time() - t0, 1)})
