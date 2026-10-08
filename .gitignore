@@ -171,3 +171,6 @@ checkpoints/
 
 # AI Editor
 .claude/
+
+# distillation run logs
+logs/

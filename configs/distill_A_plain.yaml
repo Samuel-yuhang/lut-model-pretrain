@@ -1,0 +1,12 @@
+# Qwen3-0.6B-Base, activation-only LUT (v=2, 64 centroids); hybrid scheme A = full-precision layers 3,7,...,27 (3:1)
+vec_len: 2
+ncentroids: 64
+distance_p: "2.0"
+keep_last_n: 0
+checkpoint: null
+lut_layers: [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20, 21, 22, 24, 25, 26]
+quantize_lm_head: false
+transform: none
+beta: 0.25
+codebook_task_grad: true
+assign_chunk: 4096
